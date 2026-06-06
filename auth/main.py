@@ -13,73 +13,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Update this one too so the login bouncer can see the students
-SIS_API_URL = "https://enactment-commode-configure.ngrok-free.dev/api/v1/students"
+SIS_BASE_URL = "https://automatic-certify-appointee.ngrok-free.dev"
 NGROK_HEADERS = {"ngrok-skip-browser-warning": "true"}
 
 class LoginRequest(BaseModel):
     username: str
     password: str
 
-def get_all_sis_students():
-    students_list = []
-    try:
-        response = requests.get(SIS_API_URL, headers=NGROK_HEADERS, timeout=3)
-        if response.status_code == 200:
-            data = response.json()
-            if isinstance(data, dict):
-                students_list = data.get("students") or data.get("data") or []
-            elif isinstance(data, list):
-                students_list = data
-    except Exception:
-        pass # Ignore network errors
-        
-    # UNIVERSAL PRESENTATION FAILSAFE
-    # Automatically generates 150 dynamic student profiles to perfectly match your backend database!
-    first_names = ["Aditya", "Neha", "Rohan", "Sneha", "Vikram", "Karan", "Aisha", "Kabir"]
-    last_names = ["Deshmukh", "Patil", "Joshi", "Kadam", "More", "Shinde", "Shah", "Kumar"]
-    
-    failsafe_students = []
-    for i in range(1, 150):
-        f_name = first_names[i % len(first_names)]
-        l_name = last_names[(i * 5 + 3) % len(last_names)]
-        failsafe_students.append({
-            "id": i,
-            "first_name": f_name,
-            "last_name": l_name,
-            "prn": f"PRN-2026-{1000 + i}"
-        })
-    
-    return students_list + failsafe_students
-
 @app.post("/login")
 async def authenticate_user(req: LoginRequest):
-    # 1. Hardcoded Faculty Admin
+    # 1. Hardcoded Faculty Admin (local)
     if req.username == "teacher" and req.password == "admin123":
         return {"message": "Authenticated", "role": "teacher", "id": 1, "name": "Faculty Admin", "prn": "N/A"}
-    
-    # 2. Get students (Now includes 150 synchronized backup profiles)
-    external_students = get_all_sis_students()
 
-    # 3. Verify Student
-    for s in external_students:
-        first = s.get("first_name", "")
-        last = s.get("last_name", "")
-        full_name = f"{first} {last}".strip() or s.get("full_name", "Unknown")
-        raw_id = s.get("student_id") or s.get("id") or 0
-        prn = s.get("prn_number") or s.get("prn") or "N/A"
-
-        if first and last:
-            expected_username = f"{first.capitalize()}{last[0].upper()}"
-            expected_password = f"{first.lower()}123"
-            
-            if req.username == expected_username and req.password == expected_password:
+    # 2. Try SIS OAuth2 form-encoded endpoint (/api/auth/login)
+    try:
+        sis_response = requests.post(
+            f"{SIS_BASE_URL}/api/auth/login",
+            data={"username": req.username, "password": req.password},
+            headers=NGROK_HEADERS,
+            timeout=5
+        )
+        if sis_response.status_code == 200:
+            token_data = sis_response.json()
+            access_token = token_data.get("access_token")
+            # Fetch full profile via /api/me
+            me_response = requests.get(
+                f"{SIS_BASE_URL}/api/me",
+                headers={**NGROK_HEADERS, "Authorization": f"Bearer {access_token}"},
+                timeout=5
+            )
+            if me_response.status_code == 200:
+                me = me_response.json()
                 return {
-                    "message": "Authenticated", 
-                    "role": "student", 
-                    "id": int(raw_id) if raw_id else 0, 
-                    "name": full_name, 
-                    "prn": prn
+                    "message": "Authenticated",
+                    "role": "student",
+                    "id": me.get("id") or token_data.get("user_id", 0),
+                    "name": me.get("name") or me.get("full_name") or req.username,
+                    "prn": me.get("username") or req.username
                 }
-                
-    raise HTTPException(status_code=401, detail="Invalid username or password")
+            return {
+                "message": "Authenticated",
+                "role": "student",
+                "id": token_data.get("user_id", 0),
+                "name": token_data.get("full_name") or token_data.get("username", req.username),
+                "prn": token_data.get("username", req.username)
+            }
+    except Exception:
+        pass
+
+    # 3. Try legacy SIS JSON endpoint (/api/login)
+    try:
+        legacy_response = requests.post(
+            f"{SIS_BASE_URL}/api/login",
+            json={"username": req.username, "password": req.password},
+            headers=NGROK_HEADERS,
+            timeout=5
+        )
+        if legacy_response.status_code == 200:
+            data = legacy_response.json()
+            return {
+                "message": "Authenticated",
+                "role": "student",
+                "id": data.get("id", 0),
+                "name": data.get("name") or data.get("username", req.username),
+                "prn": data.get("username") or req.username
+            }
+    except Exception:
+        pass
+
+    raise HTTPException(status_code=401, detail="Invalid credentials. Use your SIS registered email and password.")
